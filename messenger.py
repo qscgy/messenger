@@ -6,6 +6,7 @@ from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.serialization import PublicFormat, Encoding, PrivateFormat
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.exceptions import InvalidTag
 
 
 class MessengerServer:
@@ -86,6 +87,7 @@ class MessengerClient:
         self.certs[certificate.name] = certificate
 
     def kdf_rk(self, rk_in: bytes, DHs, DHr):
+        # print(f"kdf_rk on pkey {DHr.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)}")
         dh_out = DHs[0].exchange(ec.ECDH(), DHr)
         salt = rk_in
 
@@ -114,8 +116,9 @@ class MessengerClient:
         return ct, nonce
 
     def ratchet_encrypt(self, state: ConnState, plaintext: bytes):
-        print(self.name, 'CKs = ', state.CKs)
+        # print(f"{self.name:<7} CKs = ...{state.CKs[-4:].hex(' ', 4)}, generating mk")
         state.CKs, mk = self.kdf_ck(state.CKs)
+        # print(f'KDF_CK to     ...{state.CKs[-4:].hex(" ", 4)}\n')
         header = Header(self.name, state.DHs[1], state.pn, state.Ns)
         ct, nonce = self.encrypt(mk, plaintext, header.to_bytes())
         state.Ns += 1
@@ -128,14 +131,30 @@ class MessengerClient:
         return message.decode('ascii')
     
     def dh_ratchet(self, state: ConnState, header: Header):
+        # print(f"ratchet on {header.name} pkey {header.to_bytes()}")
         state.DHr = header.pkey
         state.pn = state.Ns
         state.Ns = 0
         state.Nr = 0
+        # print(f'Begin {self.name} DH ratchet')
+        # if state.CKr is not None:
+        #     print(f"{self.name:<7} CKr = ...{state.CKr[-4:].hex(' ', 4)}")
+        # else:
+        #     print(f"{self.name:<7} CKr = None")
         state.RK, state.CKr = self.kdf_rk(state.RK, state.DHs, state.DHr)
-        # print(self.name, 'ratcheting CKr in dh_ratchet', state.CKr)
+        # print(f'KDF_RK to     ...{state.CKr[-4:].hex(" ", 4)}')
+        # print(f"{self.name:<7} RK =  ...{state.RK[-4:].hex(' ', 4)}\n")
+
         state.DHs = self.generate_keypair()
+
+        # if state.CKs is not None:
+        #     print(f"{self.name:<7} CKs = ...{state.CKs[-4:].hex(' ', 4)}")
+        # else:
+        #     print(f"{self.name:<7} CKs = None")
         state.RK, state.CKs = self.kdf_rk(state.RK, state.DHs, state.DHr)
+        # print(f'KDF_RK to     ...{state.CKs[-4:].hex(" ", 4)}\n')
+        # print(f"{self.name:<7} RK =  ...{state.RK[-4:].hex(' ', 4)}\n")
+        # print(f'End {self.name} DH ratchet\n')
 
     def try_skipped(self, state: ConnState, full_header: tuple[Header, bytes], ciphertext: bytes):
         header, nonce = full_header
@@ -151,8 +170,9 @@ class MessengerClient:
             raise ValueError('Nr should be larger')
         if state.CKr != None:
             while state.Nr < until:
-                print(self.name, 'CKr in skip_keys = ', state.CKr)
+                # print(f"{self.name:<7} CKr = ...{state.CKr[-4:].hex(' ', 4)}, generating mk")
                 state.CKr, mk = self.kdf_ck(state.CKr)
+                # print(f'KDF_CK to     ...{state.CKr[-4:].hex(" ", 4)}\n')
                 state.mkskipped[(state.DHr, state.Nr)] = mk
                 state.Nr += 1
 
@@ -166,8 +186,9 @@ class MessengerClient:
             self.dh_ratchet(state, header)
         self.skip_keys(state, header.n)
         state.Nr += 1
-        print(self.name, 'CKr = ', state.CKr)
+        # print(f"{self.name:<7} CKr = ...{state.CKr[-4:].hex(' ', 4)}, generating mk")
         state.CKr, mk = self.kdf_ck(state.CKr)
+        # print(f'KDF_CK to     ...{state.CKr[-4:].hex(" ", 4)}\n')
         return self.decrypt(mk, cipertext, header.to_bytes(), nonce)
 
     def sendMessage(self, name: str, message: str):
@@ -184,7 +205,14 @@ class MessengerClient:
             state.DHs = self.generate_keypair()     # generate new keypair
             state.DHr = certificate.pkey
 
+            # print(f"\ninit {self.name:<7} RK =  ...{state.SK[-4:].hex(' ', 4)}\n")
+            # if state.CKs is not None:
+            #     print(f"{self.name:<7} CKs = ...{state.CKs[-4:].hex(' ', 4)}")
+            # else:
+            #     print(f"{self.name:<7} CKs = None")
             state.RK, state.CKs = self.kdf_rk(state.SK, state.DHs, state.DHr)
+            # print(f'KDF_RK to     ...{state.CKs[-4:].hex(" ", 4)}\n')
+            # print(f"{self.name:<7} RK =  ...{state.RK[-4:].hex(' ', 4)}\n")
             self.conns[name] = state
         else:
             state = self.conns[name]
@@ -196,16 +224,20 @@ class MessengerClient:
             certificate = self.certs[name]
             state = ConnState()
             state.DHs = self.DHs
-            # print(header[0].to_bytes())
 
             # handshake
             dh_out = self.DHs[0].exchange(ec.ECDH(), certificate.pkey)
             hkdf_init = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=None)
             state.SK = hkdf_init.derive(dh_out)
             state.RK = state.SK
+            # print(f"init {self.name:<7} RK =  ...{state.SK[-4:].hex(' ', 4)}\n")
+            self.conns[name] = state
         else:        
             state = self.conns[name]
-        plaintext = self.ratchet_decrypt(state, header, ciphertext)
+        try:
+            plaintext = self.ratchet_decrypt(state, header, ciphertext)
+        except InvalidTag:
+            return None
         return plaintext
 
     def report(self, name, message):
