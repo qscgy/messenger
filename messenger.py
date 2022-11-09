@@ -6,6 +6,9 @@ from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.serialization import PublicFormat, Encoding, PrivateFormat
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.ciphers.algorithms import AES256
+from cryptography.hazmat.primitives.ciphers.modes import CBC
+from cryptography.hazmat.primitives.ciphers import Cipher
 from cryptography.exceptions import InvalidTag
 
 
@@ -15,8 +18,13 @@ class MessengerServer:
         self.server_decryption_key = server_decryption_key
 
     def decryptReport(self, ct):
-        raise Exception("not implemented!")
-        return
+        u, nonce, ct = ct
+        ub = u.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+        v = self.server_decryption_key.exchange(ec.ECDH(), u)
+        key = HKDF(algorithm=hashes.SHA256(), length=32, salt=ub, info=None).derive(v)
+        aesgcm = AESGCM(key)
+        pt = aesgcm.decrypt(nonce, ct, None)
+        return pt
 
     def signCert(self, cert):
         bytestring = cert.to_bytes()
@@ -241,5 +249,14 @@ class MessengerClient:
         return plaintext
 
     def report(self, name, message):
-        raise Exception("not implemented!")
-        return
+        # this assumes that the party sending the report is honest about who sent the message and its contents
+        pt = b''.join([bytes(name, 'ascii'), b'----BEGIN MESSAGE----', bytes(message, 'ascii'), b'----END MESSAGE----'])
+        y = ec.generate_private_key(curve=ec.SECP256R1())
+        u = y.public_key()
+        ub = u.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+        v = y.exchange(ec.ECDH(), self.server_encryption_pk)
+        key = HKDF(algorithm=hashes.SHA256(), length=32, salt=ub, info=None).derive(v)
+        nonce = os.urandom(16)
+        aesgcm = AESGCM(key)
+        ct = aesgcm.encrypt(nonce, pt, None)
+        return pt, (u, nonce, ct)
